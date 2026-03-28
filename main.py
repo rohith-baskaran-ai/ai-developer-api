@@ -8,7 +8,9 @@ from dotenv import load_dotenv
 import uvicorn
 import os
 
-load_dotenv()
+# Load from Render secret file path OR local .env
+load_dotenv('/etc/secrets/.env')  # Render secret files path
+load_dotenv()                      # fallback for local development
 
 # ─── SETUP ──────────────────────────────────────────────
 groq_client     = None

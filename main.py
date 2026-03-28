@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, List
 from groq import Groq
@@ -6,11 +6,24 @@ from pinecone import Pinecone
 from dotenv import load_dotenv
 import uvicorn
 import os
+import time
+import logging
 
 load_dotenv()
 
-groq_client = None
-pc          = None
+# ─── LOGGING SETUP ──────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger(__name__)
+
+# ─── GLOBALS ────────────────────────────────────────────
+groq_client    = None
+pc             = None
+start_time     = time.time()
+request_count  = 0
 
 app = FastAPI(
     title="AI Developer API",
@@ -18,14 +31,33 @@ app = FastAPI(
     version="2.0.0"
 )
 
+# ─── MIDDLEWARE — log every request ─────────────────────
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    global request_count
+    request_count += 1
+
+    start    = time.time()
+    response = await call_next(request)
+    duration = time.time() - start
+
+    logger.info(
+        f"{request.method} {request.url.path} "
+        f"| {response.status_code} "
+        f"| {duration:.3f}s"
+    )
+    return response
+
+# ─── STARTUP ────────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
     global groq_client, pc
-    print("Loading models...")
+    logger.info("Starting AI Developer API...")
     groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
     pc          = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-    print("Ready!")
+    logger.info("Models loaded. API ready!")
 
+# ─── MODELS ─────────────────────────────────────────────
 class ChatRequest(BaseModel):
     message:    str
     system:     Optional[str] = "You are a helpful assistant."
@@ -40,6 +72,7 @@ class SummarizeRequest(BaseModel):
     text:       str
     num_points: Optional[int] = 5
 
+# ─── HELPER ─────────────────────────────────────────────
 def call_llm(system, user, max_tokens=500):
     response = groq_client.chat.completions.create(
         model="llama-3.3-70b-versatile",
@@ -51,18 +84,33 @@ def call_llm(system, user, max_tokens=500):
     )
     return response.choices[0].message.content, response.usage.total_tokens
 
+# ─── ROUTES ─────────────────────────────────────────────
 @app.get("/")
 def root():
     return {
         "message":   "AI Developer API v2.0",
-        "endpoints": ["/chat", "/summarize", "/health"]
+        "endpoints": ["/chat", "/summarize", "/health", "/stats"]
     }
 
 @app.get("/health")
 def health():
+    uptime_seconds = int(time.time() - start_time)
+    hours, rem     = divmod(uptime_seconds, 3600)
+    minutes, secs  = divmod(rem, 60)
+
     return {
-        "status":  "healthy",
-        "version": "2.0.0"
+        "status":          "healthy",
+        "version":         "2.0.0",
+        "uptime":          f"{hours}h {minutes}m {secs}s",
+        "uptime_seconds":  uptime_seconds,
+    }
+
+@app.get("/stats")
+def stats():
+    return {
+        "total_requests": request_count,
+        "uptime_seconds": int(time.time() - start_time),
+        "version":        "2.0.0"
     }
 
 @app.post("/chat", response_model=ChatResponse)
@@ -72,6 +120,7 @@ def chat(request: ChatRequest):
     if len(request.message) > 2000:
         raise HTTPException(status_code=400, detail="Message too long")
     try:
+        logger.info(f"Chat request: '{request.message[:50]}...'")
         response, tokens = call_llm(
             system=request.system,
             user=request.message,
@@ -83,6 +132,7 @@ def chat(request: ChatRequest):
             tokens=tokens
         )
     except Exception as e:
+        logger.error(f"Chat failed: {e}")
         raise HTTPException(status_code=500, detail=f"LLM call failed: {e}")
 
 @app.post("/summarize")
@@ -92,6 +142,7 @@ def summarize(request: SummarizeRequest):
     if len(request.text) < 50:
         raise HTTPException(status_code=400, detail="Text too short")
     try:
+        logger.info(f"Summarize request: {len(request.text)} chars")
         summary, tokens = call_llm(
             system=f"Summarize into {request.num_points} clear bullet points.",
             user=request.text[:4000]
@@ -103,6 +154,7 @@ def summarize(request: SummarizeRequest):
             "tokens_used":     tokens
         }
     except Exception as e:
+        logger.error(f"Summarize failed: {e}")
         raise HTTPException(status_code=500, detail=f"Summarization failed: {e}")
 
 if __name__ == "__main__":

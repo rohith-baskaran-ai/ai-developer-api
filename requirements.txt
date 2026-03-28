@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+groq
+pinecone
+sentence-transformers
+python-dotenv
+requests
+beautifulsoup4
